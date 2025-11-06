@@ -1,0 +1,73 @@
+name: Save any image to tar with 75 GB SSD
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: 'Docker image to pull, e.g. prom/prometheus:nightly'
+        required: true
+        default: 'prom/prometheus'
+
+jobs:
+  save:
+    runs-on: ubuntu-latest
+    steps:
+      # ---------- 0. 统一解析短名、tag、tarball ----------
+      - name: Parse image name & tag
+        id: parse
+        run: |
+          IMG="${{ github.event.inputs.image }}"
+
+          # 去掉仓库域名前缀
+          SHORT=$(echo "$IMG" | sed -E 's@^.*/@@; s/[:@].*$//')
+
+          # 判断是否带 tag
+          if [[ "$IMG" == *":"* ]]; then
+            TAG=$(echo "$IMG" | rev | cut -d: -f1 | rev)
+          else
+            TAG="latest"
+          fi
+
+          TARBALL="${SHORT}-${TAG}.tar"
+          echo "short=$SHORT" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "tarball=$TARBALL" >> $GITHUB_OUTPUT
+          echo "artifact=${SHORT}-${TAG}-tar" >> $GITHUB_OUTPUT
+
+      # ---------- 1. 清理系统盘 ----------
+      - name: Maximize disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo docker system prune -af --volumes
+          df -h
+
+      # ---------- 2. 把 Docker 目录搬到 /mnt ----------
+      - name: Move Docker to /mnt
+        run: |
+          sudo systemctl stop docker
+          sudo mv /var/lib/docker /mnt/docker
+          sudo ln -s /mnt/docker /var/lib/docker
+          sudo systemctl start docker
+
+      # ---------- 3. 工作目录也放 /mnt ----------
+      - name: Set WORKDIR to /mnt
+        run: |
+          sudo mkdir -p /mnt/work
+          sudo chmod 777 /mnt/work
+          echo "GITHUB_WORKSPACE=/mnt/work" >> $GITHUB_ENV
+
+      # ---------- 4. 拉镜像 ----------
+      - name: Pull image
+        run: docker pull "${{ github.event.inputs.image }}"
+
+      # ---------- 5. save ----------
+      - name: Docker save
+        run: |
+          docker save -o /mnt/work/${{ steps.parse.outputs.tarball }} ${{ github.event.inputs.image }}
+
+      # ---------- 6. 上传 ----------
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.parse.outputs.artifact }}
+          path: /mnt/work/${{ steps.parse.outputs.tarball }}
